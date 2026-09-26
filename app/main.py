@@ -1,0 +1,83 @@
+"""FastAPI 应用入口。"""
+from __future__ import annotations
+
+from fastapi import FastAPI, HTTPException
+
+from .engine import compute
+from .counters import CounterRenderError, render_counter_tree
+from .keyframe import KeyframeValidationError, sample_keyframes
+from .math_eval import MathEvaluationError, evaluate_math
+from .models import (
+    ComputeRequest,
+    ComputeResponse,
+    CounterRenderRequest,
+    CounterRenderResponse,
+    KeyframeSampleRequest,
+    KeyframeSampleResponse,
+    MathEvaluateRequest,
+    MathEvaluateResponse,
+    OverlapRequest,
+    OverlapResponse,
+)
+from .overlap import selector_overlap
+from .selector import SelectorSyntaxError
+
+app = FastAPI(
+    title="CSS Cascade Explainer",
+    version="1.0.0",
+    description="CSS 层叠解释 API：按来源 / 层 / important / 特异性 / 源码次序计算声明胜出者，"
+    "解析自定义属性与 var()，并给出逐步淘汰证据；另含选择器可命中性判断、"
+    " CSS 数值属性关键帧采样、CSS 计数器元素树渲染与 CSS 数学表达式求值。",
+)
+
+
+@app.get("/health")
+def health() -> dict:
+    return {"status": "ok"}
+
+
+@app.post("/compute", response_model=ComputeResponse)
+def compute_endpoint(req: ComputeRequest) -> ComputeResponse:
+    try:
+        return compute(req)
+    except SelectorSyntaxError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/selector-overlap", response_model=OverlapResponse)
+def selector_overlap_endpoint(req: OverlapRequest) -> OverlapResponse:
+    """不提供 DOM 样本，判断两条选择器能否命中同一目标元素。"""
+    try:
+        return selector_overlap(req.selector_a, req.selector_b)
+    except SelectorSyntaxError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/keyframe-sample", response_model=KeyframeSampleResponse)
+def keyframe_sample_endpoint(req: KeyframeSampleRequest) -> KeyframeSampleResponse:
+    """在查询时刻对单个 CSS 数值属性按关键帧与缓动函数采样。"""
+    try:
+        return sample_keyframes(req)
+    except KeyframeValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/counter-render", response_model=CounterRenderResponse)
+def counter_render_endpoint(req: CounterRenderRequest) -> CounterRenderResponse:
+    """按 reset -> set -> increment -> 渲染顺序先序遍历元素树，解析
+    counter() / counters() 并返回逐节点文本与作用域变更轨迹。"""
+    try:
+        return render_counter_tree(req)
+    except CounterRenderError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/math-evaluate", response_model=MathEvaluateResponse)
+def math_evaluate_endpoint(req: MathEvaluateRequest) -> MathEvaluateResponse:
+    """计算 CSS 数学表达式：calc() / min() / max() / clamp() 与 + - * /，
+    按 context 把 em / rem / vw / vh / % 规范化为 px，返回规范化数值、
+    单位、AST 与逐节点求值轨迹。"""
+    try:
+        return evaluate_math(req)
+    except MathEvaluationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
