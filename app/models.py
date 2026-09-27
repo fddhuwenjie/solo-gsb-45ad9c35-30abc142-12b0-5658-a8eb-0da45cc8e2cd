@@ -398,3 +398,142 @@ class MathEvaluateResponse(BaseModel):
     unit: str  # "px" 或 ""（无单位）
     ast: MathAstNodeOut
     trace: list[MathTraceStepOut]
+
+
+# ---------- POST /grid-tracks ----------
+
+
+class GridItemIn(BaseModel):
+    """单行网格中的一个项目。
+
+    start：起始列线（1 起，含）；span：跨列数（正整数）；
+    min_content：项目占用轨道至少要容纳的内容宽度（px）。
+    id 可选，仅用于在 overflow 中回指项目。
+    """
+
+    start: int
+    span: int = 1
+    min_content: float = 0.0
+    id: Optional[object] = None
+
+    @field_validator("start", "span", mode="before")
+    @classmethod
+    def _strict_int(cls, v):
+        # 与计数器操作值同理：拒绝布尔与浮点，列线 / 跨度必须为整数
+        if isinstance(v, bool) or isinstance(v, float):
+            raise ValueError("start / span 必须为整数")
+        return v
+
+    @field_validator("min_content", mode="before")
+    @classmethod
+    def _reject_bool_min(cls, v):
+        if isinstance(v, bool):
+            raise ValueError("min_content 必须为非负数值，不能是布尔值")
+        return v
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _id_type(cls, v):
+        if v is None:
+            return v
+        if isinstance(v, bool) or not isinstance(v, (str, int)):
+            raise ValueError("项目 id 必须为字符串或整数")
+        if isinstance(v, str) and not v.strip():
+            raise ValueError("项目 id 不能为空字符串")
+        return v
+
+
+class GridTracksRequest(BaseModel):
+    """单行 CSS Grid 列宽求解请求。
+
+    columns 每项为一条轨道语法：Npx、N%、Nfr 或 minmax(下限, 上限)，
+    下限可为 Npx / N%，上限可为 Npx / N% / Nfr。
+    """
+
+    container_width: float
+    gap: float = 0.0
+    columns: list[str]
+    items: list[GridItemIn] = Field(default_factory=list)
+
+    @field_validator("container_width", "gap", mode="before")
+    @classmethod
+    def _reject_bool(cls, v):
+        if isinstance(v, bool):
+            raise ValueError("container_width / gap 必须为数值，不能是布尔值")
+        return v
+
+
+class GridTrackOut(BaseModel):
+    """一列的求解结果。
+
+    base：min_content 分配后的基础尺寸；limit：上限（fr 上限为 null）；
+    final：最终尺寸。
+    """
+
+    index: int
+    definition: str
+    base: float
+    limit: Optional[float]
+    final: float
+
+
+class GridRoundOut(BaseModel):
+    """求解过程的逐轮轨迹。
+
+    phase：
+      - min_content：处理某个项目的最小内容缺口，按轮等额分给可增长轨道，
+        触及 minmax 上限的轨道退出，其份额转给其余轨道；
+      - fr：剩余空间按 fr 迭代分配；比例份额低于基础尺寸的轨道被固定，
+        重算其余轨道的份额。
+    item_index：min_content 轮对应的项目下标（输入顺序，0 起）；fr 轮为 null。
+    target / deficit / share：本轮处理对象、待分配缺口与每条可增长轨道的份额。
+    active：本轮仍可增长的列下标；capped：本轮因触顶退出的列下标及所得宽度。
+    frozen：fr 轮中被固定在基础尺寸的列下标。
+    free_space：fr 轮中本轮可供分配的剩余空间。
+    overflow：min_content 轮结束后仍未满足的缺口（0 表示已满足）。
+    """
+
+    phase: Literal["min_content", "fr"]
+    round: int
+    item_index: Optional[int] = None
+    item_id: Optional[object] = None
+    target: Optional[list[int]] = None
+    deficit: float
+    share: Optional[float] = None
+    active: list[int] = Field(default_factory=list)
+    capped: list["GridCappedOut"] = Field(default_factory=list)
+    frozen: list[int] = Field(default_factory=list)
+    free_space: Optional[float] = None
+    overflow: float = 0.0
+    detail: str = ""
+
+
+class GridCappedOut(BaseModel):
+    """某轮中触及上限而退出的一条轨道。"""
+
+    index: int
+    limit: float
+    grew: float
+
+
+class GridOverflowOut(BaseModel):
+    """无法满足 min_content 的项目及溢出缺口。"""
+
+    item_index: int
+    item_id: Optional[object] = None
+    start: int
+    span: int
+    min_content: float
+    available: float
+    overflow: float
+
+
+class GridTracksResponse(BaseModel):
+    container_width: float
+    gap: float
+    used_gap: float  # 实际计入的总间距（列数 - 1）× gap
+    tracks: list[GridTrackOut]
+    rounds: list[GridRoundOut]
+    overflow: list[GridOverflowOut]
+    free_space: float  # fr 阶段开始时的剩余空间
+    total_tracks_width: float  # 各列最终尺寸之和（不含间距）

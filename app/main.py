@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException
 
 from .engine import compute
 from .counters import CounterRenderError, render_counter_tree
+from .grid import GridTrackError, solve_grid_tracks
 from .keyframe import KeyframeValidationError, sample_keyframes
 from .math_eval import MathEvaluationError, evaluate_math
 from .models import (
@@ -12,6 +13,8 @@ from .models import (
     ComputeResponse,
     CounterRenderRequest,
     CounterRenderResponse,
+    GridTracksRequest,
+    GridTracksResponse,
     KeyframeSampleRequest,
     KeyframeSampleResponse,
     MathEvaluateRequest,
@@ -27,7 +30,8 @@ app = FastAPI(
     version="1.0.0",
     description="CSS 层叠解释 API：按来源 / 层 / important / 特异性 / 源码次序计算声明胜出者，"
     "解析自定义属性与 var()，并给出逐步淘汰证据；另含选择器可命中性判断、"
-    " CSS 数值属性关键帧采样、CSS 计数器元素树渲染与 CSS 数学表达式求值。",
+    " CSS 数值属性关键帧采样、CSS 计数器元素树渲染、CSS 数学表达式求值"
+    "与单行 CSS Grid 列宽求解。",
 )
 
 
@@ -80,4 +84,14 @@ def math_evaluate_endpoint(req: MathEvaluateRequest) -> MathEvaluateResponse:
     try:
         return evaluate_math(req)
     except MathEvaluationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/grid-tracks", response_model=GridTracksResponse)
+def grid_tracks_endpoint(req: GridTracksRequest) -> GridTracksResponse:
+    """求解单行 CSS Grid 的列宽：先按项目 min_content 等额增长 minmax 轨道，
+    再按 fr 迭代分配剩余空间，返回各列基础尺寸 / 上限 / 最终尺寸与逐轮轨迹。"""
+    try:
+        return solve_grid_tracks(req)
+    except GridTrackError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

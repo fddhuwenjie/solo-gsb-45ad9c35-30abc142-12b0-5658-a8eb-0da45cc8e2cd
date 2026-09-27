@@ -1,0 +1,13 @@
+{
+  "container_width": 1000,
+  "gap": 10,
+  "columns": [
+    "200px",
+    "minmax(100px, 200px)",
+    "1fr",
+    "minmax(0px, 1fr)"
+  ],
+  "items": [
+    {"id": "banner", "start": 1, "span": 4, "min_content": 900}
+  ]
+}

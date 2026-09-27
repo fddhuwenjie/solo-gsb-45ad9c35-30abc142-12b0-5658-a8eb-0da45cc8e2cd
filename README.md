@@ -16,6 +16,7 @@ docker compose up --build
 - `POST /keyframe-sample` — CSS 数值属性关键帧采样
 - `POST /counter-render` — CSS 计数器元素树渲染（counter-reset/set/increment 与 counter()/counters()）
 - `POST /math-evaluate` — CSS 数学表达式求值（calc/min/max/clamp 与四则运算）
+- `POST /grid-tracks` — 单行 CSS Grid 列宽求解（px/%/fr/minmax 与 min_content 分配）
 - `GET /health` — 健康检查
 - `GET /docs` — Swagger UI 交互文档
 
@@ -612,6 +613,121 @@ curl -X POST http://localhost:8000/math-evaluate \
 - **除零**：除数为 0（包括子表达式求值结果为 0）；
 - **非有限结果**：字面值溢出或运算得到 `NaN` / `Infinity`。
 
+## POST /grid-tracks：单行 CSS Grid 列宽求解
+
+给定容器宽度 `container_width`、列间距 `gap`、由 `px` / 百分比 / `fr` /
+`minmax(下限, 上限)` 定义的若干列轨道，以及带 `start` / `span` /
+`min_content` 的项目，模拟 CSS Grid 的轨道尺寸算法求各列宽度，并返回
+**各列的基础尺寸、上限、最终尺寸与逐轮分配轨迹**；无法满足 `min_content`
+的项目在 `overflow` 中列出缺口。
+
+```bash
+curl -X POST http://localhost:8000/grid-tracks \
+  -H 'Content-Type: application/json' \
+  -d @examples/grid-tracks.json
+```
+
+请求体（见 `examples/grid-tracks.json`）：
+
+```json
+{
+  "container_width": 1000,
+  "gap": 10,
+  "columns": ["200px", "minmax(100px, 200px)", "1fr", "minmax(0px, 1fr)"],
+  "items": [
+    {"id": "banner", "start": 1, "span": 4, "min_content": 900}
+  ]
+}
+```
+
+### 轨道语法与基础尺寸 / 上限
+
+| 轨道 | 基础尺寸（base） | 增长上限（limit） | min_content 阶段可增长 |
+| --- | --- | --- | --- |
+| `Npx` | N | N | 否（固定） |
+| `N%` | N × container_width / 100 | 同基础尺寸 | 否（固定） |
+| `Nfr` | 0 | 无（`null`） | 是 |
+| `minmax(Npx\|N%, Npx\|N%)` | 下限 | 上限 | 是 |
+| `minmax(Npx\|N%, Nfr)` | 下限 | 无（`null`），带 fr 因子 N | 是 |
+
+百分比一律相对 `container_width` 解析（间距不计入其基准）。固定型
+`minmax` 的下限解析后大于上限时，按 CSS 语义把上限夹到下限。`fr` 因子为
+0 的轨道不参与剩余空间分配。
+
+### 求解过程
+
+1. **固定轨道解析**：按上表确定每列的基础尺寸、上限与 fr 因子；
+2. **min_content 分配**：项目按**跨度从短到长、同跨度按输入顺序**处理。
+   项目跨度内各列当前尺寸加上内部间距（`gap × (span - 1)`）仍不足
+   `min_content` 时，缺口在跨度内的可增长轨道（`minmax` 与裸 `fr`）间
+   **等额分配**；吃不下自己份额的轨道只长到上限并退出，其未满足的份额
+   在下一轮**转给其余轨道**，直至缺口补齐或无轨道可增长；
+3. **fr 分配**：扣除全部间距与各列基础尺寸后得到剩余空间，按 fr 迭代分配。
+   每条 fr 轨道按 `份额 = 剩余空间 × fr / Σfr` 在其基础尺寸之上增长；若某
+   轨道算得的份额低于其基础尺寸，则**先固定该轨道**（保持基础尺寸、退出
+   分配），再用其余轨道**重算份额**，直至没有轨道被固定。剩余空间不足时
+   fr 轨道保持基础尺寸；没有任何 fr 轨道时剩余空间不分配。
+
+上例中项目跨满 4 列、需要 900px：初始四列共 300px、内部间距 30px，缺口
+570px。三条可增长轨道各分 190px，但列 2（上限 200、room 100）触顶退出，
+剩余 470px 由两条 fr 轨道各拿 235px。fr 阶段只剩 100px，两份额各 50px 均
+低于其基础 235px，两条 fr 轨道被固定，最终列宽 `[200, 200, 235, 235]`：
+
+```json
+{
+  "container_width": 1000.0,
+  "gap": 10.0,
+  "used_gap": 30.0,
+  "tracks": [
+    {"index": 0, "definition": "200px",              "base": 200.0, "limit": 200.0, "final": 200.0},
+    {"index": 1, "definition": "minmax(100px, 200px)","base": 200.0, "limit": 200.0, "final": 200.0},
+    {"index": 2, "definition": "1fr",                "base": 235.0, "limit": null,  "final": 235.0},
+    {"index": 3, "definition": "minmax(0px, 1fr)",   "base": 235.0, "limit": null,  "final": 235.0}
+  ],
+  "free_space": 100.0,
+  "total_tracks_width": 870.0,
+  "overflow": [],
+  "rounds": [
+    {"phase": "min_content", "round": 1, "item_index": 0, "item_id": "banner",
+     "target": [0, 1, 2, 3], "deficit": 570.0, "share": 190.0,
+     "active": [2, 3], "capped": [{"index": 1, "limit": 200.0, "grew": 100.0}],
+     "overflow": 470.0},
+    {"phase": "min_content", "round": 2, "deficit": 470.0, "share": 235.0,
+     "active": [2, 3], "capped": [], "overflow": 0.0},
+    {"phase": "fr", "round": 3, "free_space": 100.0, "share": 50.0,
+     "active": [2, 3], "frozen": [2, 3]},
+    {"phase": "fr", "round": 4, "free_space": 100.0, "share": 0.0,
+     "active": [], "frozen": []}
+  ]
+}
+```
+
+### 响应字段
+
+- `tracks[]`：按列顺序给出 `index`（0 起）、原始 `definition`、`base`
+  （min_content 阶段结束、fr 阶段开始前的尺寸）、`limit`（fr 上限为
+  `null`）与 `final`；
+- `rounds[]`：逐轮轨迹。`min_content` 轮带 `item_index` / `item_id` /
+  `target`（跨度列下标）、本轮 `deficit`、每轨道 `share`、轮后仍可增长的
+  `active`、本轮触顶退出的 `capped`（含触顶值与实际增长量）及轮后剩余缺口
+  `overflow`；`fr` 轮带本轮 `free_space`、单位份额 `share`、参与的 `active`
+  与本轮固定的 `frozen`；每轮另有中文 `detail`；
+- `overflow[]`：无法满足的项目，含 `item_index`（输入顺序，0 起）、
+  `item_id`、`start`、`span`、要求的 `min_content`、实际 `available`
+  （跨度内列宽加内部间距）与 `overflow` 缺口。
+- `used_gap` 为实际计入的总间距 `gap × (列数 - 1)`，`free_space` 为 fr
+  阶段开始时的剩余空间，`total_tracks_width` 为各列最终尺寸之和（不含间距）。
+
+### 校验（HTTP 422）
+
+以下情况返回 422 并在 `detail` 中说明原因：
+
+- `container_width` / `gap` / `min_content` 为负值或非有限数（`NaN` / `Infinity`）；
+- `span` 不是正整数、`start < 1`，或项目终止列线超出列数（**越界**）；
+- 轨道语法非法：不是 `Npx` / `N%` / `Nfr` / `minmax(下限, 上限)`、
+  数字为负、`minmax` 参数个数不对、下限使用 `fr`、边界单位非法等；
+- `columns` 为空。
+
 ## 请求模型
 
 | 字段 | 说明 |
@@ -662,7 +778,7 @@ curl -X POST http://localhost:8000/math-evaluate \
 app/
   main.py       FastAPI 入口（POST /compute、POST /selector-overlap、
                 POST /keyframe-sample、POST /counter-render、
-                POST /math-evaluate、GET /health）
+                POST /math-evaluate、POST /grid-tracks、GET /health）
   models.py     请求 / 响应模型
   selector.py   选择器解析与匹配、特异性计算
   overlap.py    选择器可命中性对齐搜索与冲突诊断
@@ -671,6 +787,8 @@ app/
                 counter()/counters() 渲染
   math_eval.py  CSS 数学表达式：calc/min/max/clamp 词法语法分析、
                 单位换算、维度规则与逐节点求值轨迹
+  grid.py       单行 CSS Grid：px/%/fr/minmax 轨道解析、
+                min_content 等额增长与 fr 迭代冻结
   cascade.py    层叠排序键与淘汰证据生成
   variables.py  var() 解析替换、自定义属性继承与循环检测
   engine.py     计算编排
@@ -679,10 +797,12 @@ tests/test_overlap.py     /selector-overlap 端到端测试
 tests/test_keyframe.py    /keyframe-sample 端到端测试
 tests/test_counters.py    /counter-render 端到端测试
 tests/test_math_eval.py   /math-evaluate 端到端测试
+tests/test_grid.py        /grid-tracks 端到端测试
 examples/request.json          /compute 示例请求
 examples/keyframe-sample.json  /keyframe-sample 示例请求
 examples/counter-render.json   /counter-render 示例请求
 examples/math-evaluate.json    /math-evaluate 示例请求
+examples/grid-tracks.json      /grid-tracks 示例请求
 Dockerfile / docker-compose.yml
 ```
 
