@@ -1,7 +1,7 @@
 """请求 / 响应的数据模型（Pydantic）。"""
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -398,3 +398,136 @@ class MathEvaluateResponse(BaseModel):
     unit: str  # "px" 或 ""（无单位）
     ast: MathAstNodeOut
     trace: list[MathTraceStepOut]
+
+
+# ---------- POST /grid-tracks ----------
+
+
+class GridItemIn(BaseModel):
+    """单行 Grid 中的一个项目。
+
+    start 为起始列号（1 起），span 为跨越列数（正整数），
+    min_content 为项目的最小内容宽度（px，非负）。
+    """
+
+    start: int
+    span: int = 1
+    min_content: float = 0.0
+    name: Optional[str] = None
+
+    @field_validator("start", "span", mode="before")
+    @classmethod
+    def _reject_non_int(cls, v):
+        # 与计数器操作值同理：布尔不能并入整数，跨度必须是整数
+        if isinstance(v, bool) or isinstance(v, float):
+            raise ValueError("start / span 必须为整数")
+        return v
+
+
+class GridTracksRequest(BaseModel):
+    """单行 CSS Grid 列宽求解请求。
+
+    columns 每项为一条轨道定义：px（如 "120px"）、百分比（如 "25%"）、
+    fr（如 "1fr"）或 minmax(px|%, px|%|fr)（如 "minmax(100px, 1fr)"）。
+    gap 为列间间距（px，非负）。
+    """
+
+    container_width: float
+    gap: float = 0.0
+    columns: list[str]
+    items: list[GridItemIn] = Field(default_factory=list)
+
+
+class GridTrackOut(BaseModel):
+    """一列轨道的求解结果。
+
+    base 为基础尺寸（px），cap 为增长上限（px；null 表示无上限），
+    final_size 为最终尺寸。fr 为该轨道参与 fr 分配的因子（不参与为 0）。
+    """
+
+    index: int
+    definition: str
+    kind: str  # px / % / fr / minmax
+    base: float
+    cap: Optional[float] = None
+    fr: float = 0.0
+    final_size: float
+
+
+class GridOverflowOut(BaseModel):
+    """无法满足 min_content 的项目及其溢出缺口。
+
+    available 为跨列轨道最终尺寸之和（不含列间 gap），
+    gap 为 min_content - available 的缺口。
+    """
+
+    item_index: int
+    name: Optional[str] = None
+    start: int
+    span: int
+    min_content: float
+    available: float
+    gap: float
+
+
+class GridMinContentRoundOut(BaseModel):
+    """单个项目 min_content 分配中的一轮。
+
+    shortfall 为本轮开始时的剩余缺口；growable 为本轮候选可增长列
+    （0 起下标）；share 为每列等额份额；capped 为本轮触及上限、份额
+    被收回的列；redistributed 为接收回流份额、参与下一轮的列。
+    """
+
+    shortfall: float
+    growable: list[int]
+    share: float
+    capped: list[int] = Field(default_factory=list)
+    redistributed: list[int] = Field(default_factory=list)
+
+
+class GridFrRoundOut(BaseModel):
+    """fr 剩余空间迭代分配中的一轮。
+
+    free_space 为本轮待分配空间（扣除间距、固定轨道与已固定 fr 轨道的
+    基础尺寸）；active 为仍按 fr 弹性增长的列；fr_sum 为其 fr 因子之和；
+    fr_size 为每 1fr 对应的尺寸；frozen 为因比例份额低于基础尺寸而在
+    本轮固定的列；targets 为各活动列按 max(基础, fr*fr_size) 的目标尺寸。
+    """
+
+    free_space: float
+    active: list[int]
+    fr_sum: float
+    fr_size: float
+    frozen: list[int]
+    targets: dict[str, float]
+
+
+class GridTraceStepOut(BaseModel):
+    """逐轮轨迹的一步。
+
+    phase 为 min_content 时描述单个项目的最小内容缺口分配
+    （item_index / start / span / rounds / unmet）；phase 为 fr 时
+    描述剩余空间的 fr 迭代分配（rounds 为逐轮记录）。
+    """
+
+    phase: Literal["min_content", "fr"]
+    item_index: Optional[int] = None
+    name: Optional[str] = None
+    start: Optional[int] = None
+    span: Optional[int] = None
+    min_content: Optional[float] = None
+    rounds: list[Union[GridMinContentRoundOut, GridFrRoundOut]] = Field(default_factory=list)
+    unmet: Optional[float] = None
+    initial_free_space: Optional[float] = None
+
+
+class GridTracksResponse(BaseModel):
+    container_width: float
+    gap: float
+    total_gap: float
+    processing_order: list[int]  # 项目处理顺序（输入下标；跨度升序、同跨度原序）
+    tracks: list[GridTrackOut]
+    used_width: float  # 各列最终尺寸 + 间距合计
+    container_overflow: float  # used_width 超出容器宽度的部分（否则 0）
+    overflow: list[GridOverflowOut] = Field(default_factory=list)
+    trace: list[GridTraceStepOut] = Field(default_factory=list)
